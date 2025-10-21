@@ -6,20 +6,7 @@
 	<meta name="viewport" content="width=device-width,initial-scale=1" />
 	<title>Processador de Frequência - Demo</title>
 	<link href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" rel="stylesheet">
-	<style>
-		body{font-family:Roboto,Arial;background:#e6f0fb;margin:0;display:flex;align-items:center;justify-content:center;height:100vh}
-		.card{background:#fff;padding:28px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.08);width:520px}
-		h1{font-size:20px;margin:0 0 16px;color:#114a6b}
-		label{display:block;margin-top:12px;font-size:13px;color:#333}
-		input[type=file]{margin-top:6px}
-		select,input[type=date],button{width:100%;padding:10px;border-radius:6px;border:1px solid #cfdde9;margin-top:6px}
-		.row{display:flex;gap:10px}
-		.row > *{flex:1}
-		#colsContainer{max-height:140px;overflow:auto;border:1px dashed #ddd;padding:8px;border-radius:6px;background:#fbfeff}
-		.help{font-size:13px;color:#226; margin-top:8px}
-		.message{margin-top:14px;padding:12px;border-radius:6px;background:#eef8ee;color:#0a6b1f;display:none}
-		.btn-primary{background:linear-gradient(180deg,#2b6a8a,#1f4f67);color:#fff;border:none;cursor:pointer}
-	</style>
+	<link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 	<div class="card">
@@ -28,8 +15,14 @@
 		<label>Arquivo Empresa (CSV)<br><small style="color:#666">Selecione o arquivo CSV (delimitador ;)</small></label>
 		<input id="fileEmpresa" type="file" accept="text/csv" />
 
-		<label>Empresa</label>
-		<select id="empresaSelect"><option value="Todas">Todas</option></select>
+		<label>Empresa (digite ou selecione)</label>
+		<input id="empresaInput" list="empresaList" placeholder="Todas" />
+		<datalist id="empresaList">
+			<option value="Todas"></option>
+		</datalist>
+		<!-- select visível para listar empresas (mostra CNPJ — Nome) -->
+		<!--  <select id="empresaSelectVisible" style="margin-top:6px"></select> -->
+		
 
 		<label>Turma</label>
 		<select id="turmaSelect"><option value="Todas">Todas</option></select>
@@ -40,6 +33,9 @@
 			<input id="dateEnd" type="date" />
 		</div>
 
+		<label>Campo DATA (opcional - escolha manual se necessário)</label>
+		<select id="dataFieldSelect"><option value="">(detectar automaticamente)</option></select>
+
 		<label>Campos a incluir no relatório</label>
 		<div id="colsContainer">Nenhum arquivo carregado.</div>
 
@@ -48,6 +44,7 @@
 		<div id="message" class="message">Relatório gerado com sucesso!</div>
 		<div class="help">Observação: o CSV de exemplo usa ponto-e-vírgula (;) como separador. Abra a página no navegador e selecione o arquivo.</div>
 	</div>
+		<div id="debug" style="position:fixed;left:12px;bottom:12px;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee;font-size:12px;max-width:320px;box-shadow:0 3px 8px rgba(0,0,0,0.06)"></div>
 
 	<!-- Dependências: PapaParse para parsing robusto e SheetJS para gerar Excel -->
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
@@ -56,18 +53,25 @@
 		// Estado
 		let rawData = [];
 		let headers = [];
+		let selectedEmpresaKey = null; // guarda o CNPJ (ou nome) usado internamente para filtragem
+		let empresaOptions = []; // master list of {value,label} for empresas (used for live filtering)
 
 		const fileInput = document.getElementById('fileEmpresa');
-		const empresaSelect = document.getElementById('empresaSelect');
+		const empresaInput = document.getElementById('empresaInput');
+		const empresaList = document.getElementById('empresaList');
+		const empresaSelectVisible = document.getElementById('empresaSelectVisible');
 		const turmaSelect = document.getElementById('turmaSelect');
 		const colsContainer = document.getElementById('colsContainer');
 		const processBtn = document.getElementById('processBtn');
 		const message = document.getElementById('message');
 		const dateStart = document.getElementById('dateStart');
 		const dateEnd = document.getElementById('dateEnd');
+		const dataFieldSelect = document.getElementById('dataFieldSelect');
 
 		function resetUI(){
-			empresaSelect.innerHTML = '<option value="Todas">Todas</option>';
+			empresaList.innerHTML = '<option value="Todas"></option>';
+			empresaInput.value = 'Todas';
+			empresaSelectVisible.innerHTML = '<option value="Todas">Todas</option>';
 			turmaSelect.innerHTML = '<option value="Todas">Todas</option>';
 			colsContainer.innerHTML = 'Nenhum arquivo carregado.';
 			rawData = [];
@@ -96,19 +100,137 @@
 
 		function unique(values){ return Array.from(new Set(values.filter(v=>v!=null && v!==''))); }
 
-		function setupSelectors(){
-			// Popular empresaSelect a partir da coluna 'EMPRESA' (ou outras tentativas)
-			const empresaField = headers.find(h=>h.toUpperCase().trim().includes('EMPRESA')) || 'EMPRESA';
-			const turmaField = headers.find(h=>h.toUpperCase().trim().includes('TURMA')) || 'TURMA';
+		function normalizeHeaderName(h){ return (h||'').toString().normalize('NFKD').replace(/\p{Diacritic}/gu,'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
 
-			const empresas = unique(rawData.map(r=>r[empresaField] || '').map(s=>s.trim()));
-			empresaSelect.innerHTML = '<option value="Todas">Todas</option>' + empresas.map(e=>`<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
+		function findHeaderByNormalized(name){
+			const target = name.toString().toUpperCase();
+			for(const h of headers){ if(normalizeHeaderName(h).includes(target)) return h; }
+			return null;
+		}
 
-			// Turmas (todas inicialmente)
-			const turmas = unique(rawData.map(r=>r[turmaField] || '').map(s=>s.trim()));
+		function formatCNPJFromDigits(digits){
+			if(!digits) return '';
+			const s = digits.replace(/\D/g,'');
+			if(s.length!==14) return digits; // keep original if not 14 digits
+			return s.slice(0,2)+'.'+s.slice(2,5)+'.'+s.slice(5,8)+'/'+s.slice(8,12)+'-'+s.slice(12);
+		}
+
+		function extractCNPJFromText(text){
+			if(!text) return '';
+			const m = text.match(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
+			if(m) return m[1];
+			const m2 = text.match(/(\d{14})/);
+			if(m2) return formatCNPJFromDigits(m2[1]);
+			return '';
+		}
+
+	// retorna apenas os dígitos de uma string (ou '')
+	function digitsOnly(s){ return (s||'').toString().replace(/\D/g,''); }
+
+	// Parse an <input type="date"> value (YYYY-MM-DD) as a LOCAL Date at midnight
+	function parseHTMLDateLocal(val){
+	    if(!val) return null;
+	    // expected format: YYYY-MM-DD
+	    const m = String(val).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	    if(!m) return null;
+	    const y = parseInt(m[1],10), mo = parseInt(m[2],10)-1, d = parseInt(m[3],10);
+	    return new Date(y, mo, d, 0, 0, 0, 0);
+	}
+
+	// Parse a YYYY-MM-DD value from an <input type=
+
+			function setupSelectors(){
+				// escolher corretamente os nomes das colunas. Preferir header exatamente 'EMPRESA' quando existir
+				const turmaField = headers.find(h=>h.toUpperCase().trim().includes('TURMA')) || 'TURMA';
+				const cnpjField = headers.find(h=>h.toUpperCase().includes('CNPJ')) || null;
+				let empresaField = headers.find(h=>h.toUpperCase().trim() === 'EMPRESA');
+				if(!empresaField){
+					// evitar escolher 'CNPJ_EMPRESA' como empresa
+					empresaField = headers.find(h=>h.toUpperCase().includes('EMPRESA') && !h.toUpperCase().includes('CNPJ')) || headers.find(h=>h.toUpperCase().includes('EMPRESA'));
+				}
+				empresaField = empresaField || 'EMPRESA';
+				// debug: mostrar cabeçalhos detectados
+				console.debug('headers:', headers, 'empresaField:', empresaField, 'cnpjField:', cnpjField, 'turmaField:', turmaField);
+
+			// obter mapeamento CNPJ -> nome
+			const cnpjToName = new Map();
+			const cnpjValues = [];
+
+			rawData.forEach(r=>{
+				const name = (r[empresaField]||'').trim();
+				let c = '';
+				if(cnpjField) c = (r[cnpjField]||'').trim();
+				if(!c) c = extractCNPJFromText(r[empresaField]||'').trim();
+				if(c){
+					// normalizar para formato padrão
+					const norm = formatCNPJFromDigits(c.replace(/\D/g,''));
+					if(!cnpjToName.has(norm)) cnpjToName.set(norm, name || '');
+					if(!cnpjValues.includes(norm)) cnpjValues.push(norm);
+				}
+			});
+
+			// ordenar por valor numérico dos dígitos quando possível
+					cnpjValues.sort((a,b)=>{
+						try{
+							const na = a.replace(/\D/g,''), nb = b.replace(/\D/g,'');
+							if(na.length===14 && nb.length===14){
+								// comparar como strings numéricas com padding (evita BigInt retornado)
+								if(na === nb) return 0;
+								return na < nb ? -1 : 1;
+							}
+							return a.localeCompare(b);
+						}catch(e){
+							console.warn('Erro ao ordenar CNPJs', e); return 0;
+						}
+					});
+
+
+			// montar master lista de opções: value = CNPJ ou nome, label = 'CNPJ — Nome da Empresa'
+			empresaOptions = [];
+			if(cnpjValues.length>0){
+				cnpjValues.forEach(c => { const name = cnpjToName.get(c) || ''; const label = name ? (c + ' — ' + name) : c; empresaOptions.push({value: c, label}); });
+			} else {
+				const names = unique(rawData.map(r=> (r[empresaField]||'').trim())).filter(x=>x);
+				names.forEach(n => empresaOptions.push({value: n, label: n}));
+			}
+
+			// helper to render options into datalist and visible select
+			function renderEmpresaOptions(list){
+				const datalistHtml = '<option value="Todas"></option>' + list.map(o=>`<option value="${escapeHtml(o.value)}" label="${escapeHtml(o.label)}"></option>`).join('');
+				empresaList.innerHTML = datalistHtml;
+				let selectHtml = '<option value="Todas">Todas</option>' + list.map(o=>`<option value="${escapeHtml(o.value)}" title="${escapeHtml(o.label)}">${escapeHtml(o.label)}</option>`).join('');
+				if(empresaSelectVisible) empresaSelectVisible.innerHTML = selectHtml;
+			}
+
+			// initial render (all options)
+			renderEmpresaOptions(empresaOptions);
+				// exibir debug simples
+			const debug = document.getElementById('debug');
+			if(debug) debug.textContent = 'Headers detectados: ' + headers.join(', ');
+			// popular select do campo DATA
+			if(dataFieldSelect){
+			let opts = '<option value="">(detectar automaticamente)</option>' + headers.map(h=>`<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
+			dataFieldSelect.innerHTML = opts;
+			// tentar pré-selecionar um header de data detectado
+			const detected = findHeaderByNormalized('DATA');
+			if(detected) dataFieldSelect.value = detected;
+			}
+				// atualizar area empresaFull com a opção atual (primeira)
+				const empresaFull = document.getElementById('empresaFull');
+				if(empresaFull){
+					let firstOptText = '';
+					if(empresaSelectVisible && empresaSelectVisible.options && empresaSelectVisible.selectedIndex>=0){
+						const firstOpt = empresaSelectVisible.options[empresaSelectVisible.selectedIndex];
+						firstOptText = firstOpt ? firstOpt.text : '';
+					}
+					empresaFull.textContent = firstOptText;
+				}
+
+			// popular turmas (iniciais)
+			const turmas = unique(rawData.map(r=> (r[turmaField]||'').trim()));
 			turmaSelect.innerHTML = '<option value="Todas">Todas</option>' + turmas.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
 
-			// Campos
+			// campos
 			colsContainer.innerHTML = '';
 			headers.forEach(h=>{
 				const id = 'col_' + h.replace(/[^a-z0-9]/gi,'_');
@@ -119,25 +241,107 @@
 			});
 		}
 
-		empresaSelect.addEventListener('change', ()=>{
-			// Ao trocar empresa, filtrar turmas disponíveis
+		// ao digitar/selecionar empresa, atualiza turmas relacionadas e filtra opções visíveis
+		function filterEmpresaOptions(term){
+			const q = (term||'').toString().trim().toLowerCase();
+			if(!q){ renderEmpresaOptions(empresaOptions); return; }
+			const filtered = empresaOptions.filter(o => (o.value||'').toString().toLowerCase().includes(q) || (o.label||'').toString().toLowerCase().includes(q));
+			renderEmpresaOptions(filtered);
+		}
+
+		// listener único para o input de empresa: filtrar opções e atualizar turmas
+		function handleEmpresaInput(){
 			const empresaField = headers.find(h=>h.toUpperCase().trim().includes('EMPRESA')) || 'EMPRESA';
 			const turmaField = headers.find(h=>h.toUpperCase().trim().includes('TURMA')) || 'TURMA';
-			const sel = empresaSelect.value;
+			const sel = (empresaInput.value||'').trim();
+			filterEmpresaOptions(sel);
 			let lista = rawData;
-			if(sel && sel !== 'Todas') lista = rawData.filter(r=> (r[empresaField]||'').trim() === sel);
+			if(sel && sel !== 'Todas'){
+				const q = sel.toLowerCase();
+				const digits = sel.replace(/\D/g,'');
+				const cnpjField = headers.find(h=>h.toUpperCase().includes('CNPJ')) || null;
+
+				// try to resolve a unique company key (preferred: selectedEmpresaKey, then exact by digits/value/label, then single fuzzy match)
+				let key = null;
+				if(selectedEmpresaKey) key = selectedEmpresaKey;
+				if(!key){
+					const exact = empresaOptions.find(o=>{
+						const oDigits = (o.value||'').toString().replace(/\D/g,'');
+						if(digits && oDigits && oDigits === digits) return true;
+						if((o.value||'') === sel) return true;
+						if((o.label||'') === sel) return true;
+						return false;
+					});
+					if(exact) key = exact.value;
+				}
+				if(!key){
+					const matched = empresaOptions.filter(o=>{
+						const oDigits = (o.value||'').toString().replace(/\D/g,'');
+						if(digits && oDigits && oDigits.includes(digits)) return true;
+						if((o.label||'').toLowerCase().includes(q)) return true;
+						if((o.value||'').toLowerCase().includes(q)) return true;
+						return false;
+					});
+					if(matched.length===1) key = matched[0].value;
+				}
+
+				if(key){
+					// canonicalize key as digits (prefer CNPJ digits) to use for matching
+					const keyDigits = digitsOnly(key);
+					selectedEmpresaKey = keyDigits || key; // store digits when available, else store literal
+					const label = (empresaOptions.find(o=>o.value===key)||{}).label || sel;
+					lista = rawData.filter(r=>{
+						const name = (r[empresaField]||'').toString().trim();
+						const rowCnpjDigits = cnpjField ? digitsOnly((r[cnpjField]||'').toString()) : digitsOnly(extractCNPJFromText(r[empresaField]||''));
+						// match by digits if keyDigits present
+						if(keyDigits && rowCnpjDigits && keyDigits === rowCnpjDigits) return true;
+						// fallback to normalized name equality
+						const keyLabelNorm = normalizeHeaderName(label || key || '');
+						const rowLabelNorm = normalizeHeaderName(name || '');
+						if(keyLabelNorm && rowLabelNorm && keyLabelNorm === rowLabelNorm) return true;
+						return false;
+					});
+					const empresaFull = document.getElementById('empresaFull'); if(empresaFull) empresaFull.textContent = label;
+					// debug: mostrar resolução
+					const dbg = document.getElementById('debug');
+					if(dbg) dbg.textContent = `Empresa selecionada: ${sel} -> key=${selectedEmpresaKey} (turmas filtradas: ${unique(lista.map(r=> (r[turmaField]||'').trim())).length})`;
+				} else {
+					// ambiguous or no unique match -> don't show other companies' turmas
+					lista = [];
+					selectedEmpresaKey = null;
+					const empresaFull = document.getElementById('empresaFull'); if(empresaFull) empresaFull.textContent = sel;
+					const dbg = document.getElementById('debug'); if(dbg) dbg.textContent = `Empresa digitada: ${sel} -> nenhum match único (${empresaOptions.length} opções)`;
+				}
+			} else {
+				// empty selection -> reset
+				selectedEmpresaKey = null;
+				const empresaFull = document.getElementById('empresaFull'); if(empresaFull) empresaFull.textContent = sel || '';
+			}
 			const turmas = unique(lista.map(r=> (r[turmaField]||'').trim()));
 			turmaSelect.innerHTML = '<option value="Todas">Todas</option>' + turmas.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
-		});
+			const dbg2 = document.getElementById('debug'); if(dbg2) dbg2.textContent = `Empresa=${sel} key=${key||''} matches=${empresaOptions.filter(o=> (o.label||'').toLowerCase().includes((sel||'').toLowerCase()) || (o.value||'').toLowerCase().includes((sel||'').toLowerCase())).length} turmas=${turmas.length}`;
+		}
+		empresaInput.addEventListener('input', handleEmpresaInput);
 
 		function escapeHtml(s){ if(s==null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 		function parseBRDate(str){ // dd/mm/yyyy -> Date
 			if(!str) return null;
-			const parts = str.split('/');
-			if(parts.length!==3) return new Date(str);
-			const d = parseInt(parts[0],10), m = parseInt(parts[1],10)-1, y = parseInt(parts[2],10);
-			return new Date(y,m,d);
+			const s = String(str).trim();
+			// dd/mm/yyyy or d/m/yyyy
+			let mres = s.match(/^(\d{1,2})\s*[\/\-]\s*(\d{1,2})\s*[\/\-]\s*(\d{4})$/);
+			if(mres){ const d = parseInt(mres[1],10), mo = parseInt(mres[2],10)-1, y = parseInt(mres[3],10); return new Date(y,mo,d); }
+			// yyyy-mm-dd
+			mres = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+			if(mres){ const y=parseInt(mres[1],10), mo=parseInt(mres[2],10)-1, d=parseInt(mres[3],10); return new Date(y,mo,d); }
+			// timestamp digits
+			if(/^\d+$/.test(s)){
+				const n = Number(s);
+				if(!Number.isNaN(n)) return new Date(n);
+			}
+			// fallback
+			const d = new Date(s);
+			return isNaN(d) ? null : d;
 		}
 
 		processBtn.addEventListener('click', ()=>{
@@ -145,48 +349,88 @@
 
 			const empresaField = headers.find(h=>h.toUpperCase().trim().includes('EMPRESA')) || 'EMPRESA';
 			const turmaField = headers.find(h=>h.toUpperCase().trim().includes('TURMA')) || 'TURMA';
-			const dataField = headers.find(h=>h.toUpperCase().trim()=== 'DATA') || headers.find(h=>h.toUpperCase().includes('DATA')) || 'DATA';
+			// decidir campo de data final: manual > detectado por heurística > heurística simples
+			const manualField = (dataFieldSelect && dataFieldSelect.value) ? dataFieldSelect.value : null;
+			const heuristic = findHeaderByNormalized('DATA');
+			const dataField = manualField || heuristic || null;
 
-			const selEmpresa = empresaSelect.value;
-			const selTurma = turmaSelect.value;
-
-			const start = dateStart.value ? new Date(dateStart.value) : null;
-			const end = dateEnd.value ? new Date(dateEnd.value) : null;
+			// parsear período selecionado pelo usuário (se houver) e validar
+			const start = dateStart.value ? parseHTMLDateLocal(dateStart.value) : null;
+			const end = dateEnd.value ? parseHTMLDateLocal(dateEnd.value) : null;
 			if(start && end && end < start){ alert('Período inválido: a data final é anterior à inicial.'); return; }
 
-			// Colunas selecionadas
+			// se usuário informou período, exige-se um campo DATA válido
+			if((start || end) && !dataField){
+				alert('Não foi possível detectar automaticamente a coluna de data. Por favor, selecione manualmente o "Campo DATA" antes de processar.');
+				return;
+			}
+
+			// usar selectedEmpresaKey (prefer digits-only CNPJ) quando disponível; caso contrário usar o texto digitado
+			const selEmpresaRaw = selectedEmpresaKey != null ? selectedEmpresaKey : (empresaInput.value||'').trim();
+			const selEmpresaDigits = digitsOnly(selEmpresaRaw);
+			const selTurma = turmaSelect.value;
+
 			const checkedBoxes = Array.from(colsContainer.querySelectorAll('input[type=checkbox]:checked'));
 			const selectedCols = checkedBoxes.map(cb=>cb.getAttribute('data-col'));
 			if(selectedCols.length===0){ if(!confirm('Nenhum campo selecionado — deseja incluir todas as colunas?')) return; selectedCols.push(...headers); }
 
-			// Filtrar
 			const filtered = rawData.filter(row=>{
-				// Empresa
-				if(selEmpresa && selEmpresa !== 'Todas'){
-					const val = (row[empresaField]||'').trim(); if(val !== selEmpresa) return false;
+				// Empresa / CNPJ — apenas rejeita se não corresponder (não deve burlar outros filtros)
+				if(selEmpresaRaw && selEmpresaRaw !== 'Todas'){
+					const cnpjField = headers.find(h=>h.toUpperCase().includes('CNPJ')) || null;
+					const name = (row[empresaField]||'').trim();
+					const rowCnpjDigits = cnpjField ? digitsOnly((row[cnpjField]||'').toString()) : digitsOnly(extractCNPJFromText(row[empresaField]||''));
+					// match by digits if we have them
+					if(selEmpresaDigits){ if(rowCnpjDigits !== selEmpresaDigits) return false; }
+					else {
+						// fallback to exact name match (normalized)
+						const keyNorm = normalizeHeaderName(selEmpresaRaw||'');
+						const rowNorm = normalizeHeaderName(name||'');
+						if(!(keyNorm && rowNorm && keyNorm === rowNorm)) return false;
+					}
 				}
 				// Turma
 				if(selTurma && selTurma !== 'Todas'){
 					const val = (row[turmaField]||'').trim(); if(val !== selTurma) return false;
 				}
-				// Data
-				if((start || end) && row[dataField]){
-					const dt = parseBRDate((row[dataField]||'').trim());
+				// Data (aplica somente se encontramos um campo válido)
+				if((start || end)){
+					const key = dataField;
+					const rawVal = key && (row[key] || row[key.trim()]) ? (row[key]||row[key.trim()]) : null;
+					if(!rawVal) return false; // sem valor, não considera
+					const dt = parseBRDate(rawVal);
 					if(!dt || isNaN(dt)) return false;
-					if(start && dt < start) return false;
-					if(end && dt > new Date(end.getFullYear(), end.getMonth(), end.getDate(),23,59,59)) return false;
+					// usar limites diários: start 00:00:00, end 23:59:59.999
+					const sDate = start ? new Date(start.getFullYear(), start.getMonth(), start.getDate(),0,0,0,0) : null;
+					const eDate = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate(),23,59,59,999) : null;
+					if(sDate && dt < sDate) return false;
+					if(eDate && dt > eDate) return false;
 				}
 				return true;
-			});
+			}).filter(Boolean);
 
-			// Preparar dados para Excel apenas com colunas selecionadas
 			const out = filtered.map(r => {
 				const obj = {};
-				selectedCols.forEach(c => { obj[c] = r[c]; });
+				selectedCols.forEach(c => { 
+					if(c === dataField){
+						// normalizar data para dd/mm/yyyy ao exportar
+						const raw = (r[c]||'').toString().trim();
+						const dt = parseBRDate(raw) || new Date(raw);
+						if(dt && !isNaN(dt)){
+							const dd = String(dt.getDate()).padStart(2,'0');
+							const mm = String(dt.getMonth()+1).padStart(2,'0');
+							const yy = String(dt.getFullYear());
+							obj[c] = `${dd}/${mm}/${yy}`;
+						}else{
+							obj[c] = raw;
+						}
+					}else{
+						obj[c] = r[c];
+					}
+				});
 				return obj;
 			});
 
-			// Gerar XLSX via SheetJS
 			try{
 				const ws = XLSX.utils.json_to_sheet(out, {header: selectedCols});
 				const wb = XLSX.utils.book_new();

@@ -1,0 +1,13 @@
+/* style.css - extraído de index.html */
+body{font-family:Roboto,Arial;background:#e6f0fb;margin:0;display:flex;align-items:center;justify-content:center;height:100vh}
+.card{background:#fff;padding:28px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.08);width:560px}
+h1{font-size:20px;margin:0 0 16px;color:#114a6b}
+label{display:block;margin-top:12px;font-size:13px;color:#333}
+input[type=file]{margin-top:6px}
+input,select,input[type=date],button{width:100%;padding:10px;border-radius:6px;border:1px solid #cfdde9;margin-top:6px}
+.row{display:flex;gap:10px}
+.row > *{flex:1}
+#colsContainer{max-height:140px;overflow:auto;border:1px dashed #ddd;padding:8px;border-radius:6px;background:#fbfeff}
+.help{font-size:13px;color:#226; margin-top:8px}
+.message{margin-top:14px;padding:12px;border-radius:6px;background:#eef8ee;color:#0a6b1f;display:none}
+.btn-primary{background:linear-gradient(180deg,#2b6a8a,#1f4f67);color:#fff;border:none;cursor:pointer}
